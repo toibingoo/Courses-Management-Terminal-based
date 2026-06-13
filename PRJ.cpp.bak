@@ -1,0 +1,1029 @@
+// ============================================================
+//  University Schedule Management System
+//  Projects for Programming C++ class - 20252
+//  File: PRJ.cpp  |  Build: g++ -o PRJ PRJ.cpp -std=c++17
+// ============================================================
+#include <iostream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <ctime>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <set>
+#include <iomanip>
+#include <limits>
+#include <random>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+using namespace std;
+
+// ============================================================
+//  ANSI COLOR CODES
+// ============================================================
+namespace C {
+    const string R  = "\033[0m";       // Reset
+    const string B  = "\033[1m";       // Bold
+    const string RD = "\033[91m";      // Red
+    const string GR = "\033[92m";      // Green
+    const string YL = "\033[93m";      // Yellow
+    const string BL = "\033[94m";      // Blue
+    const string MG = "\033[95m";      // Magenta
+    const string CY = "\033[96m";      // Cyan
+    const string WH = "\033[97m";      // White
+}
+
+// ============================================================
+//  DATA STRUCTURES
+// ============================================================
+struct Schedule {
+    int    dayOfWeek;   // 2=T2, 3=T3, 4=T4, 5=T5, 6=T6, 7=T7, 8=CN
+    string timeSlot;    // e.g. "07:00-09:30"
+    string room;        // e.g. "D3-209"
+};
+
+struct Student {
+    string name;
+    string studentId;
+};
+
+struct Lecturer {
+    string name;
+    string staffId;
+    string status;
+};
+
+struct Class {
+    string         className;
+    int            classCode;       // unique 1000-9999
+    string         semester;
+    int            lecturerIndex;   // index into lecturers[]
+    vector<Schedule> schedules;
+    vector<int>    studentIndices;  // indices into students[]
+};
+
+// ============================================================
+//  GLOBAL DATA
+// ============================================================
+vector<Student>  students;
+vector<Lecturer> lecturers;
+vector<Class>    classes;
+set<int>         usedCodes;
+
+// ============================================================
+//  APP STATE  (navigation state machine)
+// ============================================================
+enum class Screen {
+    MENU, TIMETABLE,
+    CLASS_LIST, CLASS_DETAIL,
+    LECTURER_DETAIL, LECTURER_COURSES,
+    STUDENT_LIST
+};
+
+struct AppState {
+    Screen screen            = Screen::MENU;
+    int    weekOffset        = 0;   // 0=this week
+    int    classPage         = 0;
+    int    classIdx          = -1;
+    int    lecturerIdx       = -1;
+    int    lecturerCoursePage = 0;
+    int    studentPage       = 0;
+} S;
+
+// ============================================================
+//  UTILITY FUNCTIONS
+// ============================================================
+void enableAnsi() {
+#ifdef _WIN32
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD  m = 0;
+    GetConsoleMode(h, &m);
+    SetConsoleMode(h, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    SetConsoleOutputCP(65001);
+#endif
+}
+
+void cls() {
+#ifdef _WIN32
+    system("cls");
+#else
+    system("clear");
+#endif
+}
+
+// Center a string within a fixed width
+string centerStr(const string& s, int w) {
+    int len = (int)s.size();
+    if (len >= w) return s.substr(0, w);
+    int l = (w - len) / 2;
+    return string(l, ' ') + s + string(w - len - l, ' ');
+}
+
+// Truncate string if too long
+string trunc(const string& s, int maxLen) {
+    if ((int)s.size() <= maxLen) return s;
+    return s.substr(0, maxLen - 3) + "...";
+}
+
+// Vietnamese day names (2-8)
+string dayName(int d) {
+    switch (d) {
+        case 2: return "Thu Hai";   case 3: return "Thu Ba";
+        case 4: return "Thu Tu";    case 5: return "Thu Nam";
+        case 6: return "Thu Sau";   case 7: return "Thu Bay";
+        case 8: return "Chu Nhat";  default: return "???";
+    }
+}
+string dayShort(int d) {
+    switch (d) {
+        case 2: return "T2"; case 3: return "T3"; case 4: return "T4";
+        case 5: return "T5"; case 6: return "T6"; case 7: return "T7";
+        case 8: return "CN"; default: return "??";
+    }
+}
+
+// Get today's day code (2=T2 ... 8=CN)
+int todayCode() {
+    time_t  now = time(nullptr);
+    struct tm* t = localtime(&now);
+    int wday = t->tm_wday;          // 0=Sun
+    return (wday == 0) ? 8 : wday + 1;
+}
+
+// Current semester string e.g. "20252"
+string currentSemester() {
+    time_t  now = time(nullptr);
+    struct tm* t = localtime(&now);
+    int m = t->tm_mon + 1;
+    int y = t->tm_year + 1900;
+    if (m >= 9)              return to_string(y)   + "1";
+    if (m == 1)              return to_string(y-1) + "1";
+    if (m >= 2 && m <= 6)   return to_string(y)   + "2";
+    return to_string(y) + "3";  // July-August
+}
+
+// Format time_t as "dd/mm"
+string fmtDate(time_t t) {
+    struct tm* tm = localtime(&t);
+    char buf[10];
+    sprintf(buf, "%02d/%02d", tm->tm_mday, tm->tm_mon + 1);
+    return buf;
+}
+
+// Format time_t as "dd/mm/yyyy"
+string fmtDateFull(time_t t) {
+    struct tm* tm = localtime(&t);
+    char buf[12];
+    sprintf(buf, "%02d/%02d/%04d", tm->tm_mday, tm->tm_mon+1, tm->tm_year+1900);
+    return buf;
+}
+
+// Monday time_t for (current week + weekOffset)
+time_t weekMonday(int offset) {
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    t->tm_hour = 12; t->tm_min = 0; t->tm_sec = 0;
+    now = mktime(t);
+    int dow = t->tm_wday;
+    if (dow == 0) dow = 7;
+    now -= (time_t)(dow - 1) * 86400;
+    now += (time_t)offset * 7 * 86400;
+    return now;
+}
+
+// ISO week number
+int weekNumber(time_t t) {
+    struct tm* tm = localtime(&t);
+    char buf[5];
+    strftime(buf, sizeof(buf), "%V", tm);
+    return atoi(buf);
+}
+
+// Indices of classes that have a session on dayCode
+vector<int> classesOnDay(int dayCode) {
+    vector<int> res;
+    for (int i = 0; i < (int)classes.size(); i++)
+        for (auto& sc : classes[i].schedules)
+            if (sc.dayOfWeek == dayCode) { res.push_back(i); break; }
+    return res;
+}
+
+// Generate a unique class code 1000-9999
+int genCode() {
+    static mt19937 rng((unsigned)time(nullptr));
+    uniform_int_distribution<int> dist(1000, 9999);
+    int code;
+    do { code = dist(rng); } while (usedCodes.count(code));
+    usedCodes.insert(code);
+    return code;
+}
+
+// ============================================================
+//  PRINT HELPERS
+// ============================================================
+void printHeader(const string& title, int w = 66) {
+    string line(w, '=');
+    cout << C::CY << line << C::R << "\n";
+    cout << C::CY << "  " << C::B << C::WH << centerStr(title, w-4) << C::R << "\n";
+    cout << C::CY << line << C::R << "\n";
+}
+
+void printSep(int w = 66, char ch = '-') {
+    cout << C::CY << "  " << string(w - 2, ch) << C::R << "\n";
+}
+
+// ============================================================
+//  FILE I/O  (data.txt)
+// ============================================================
+const string DATA_FILE = "data.txt";
+
+// Schedule encoded as "day~timeSlot~room" with ';' between sessions
+string encodeSchedules(const vector<Schedule>& v) {
+    string r;
+    for (int i = 0; i < (int)v.size(); i++) {
+        if (i) r += ";";
+        r += to_string(v[i].dayOfWeek) + "~" + v[i].timeSlot + "~" + v[i].room;
+    }
+    return r;
+}
+vector<Schedule> decodeSchedules(const string& s) {
+    vector<Schedule> v;
+    istringstream ss(s);
+    string tok;
+    while (getline(ss, tok, ';')) {
+        if (tok.empty()) continue;
+        istringstream ts(tok);
+        string d, t, r;
+        getline(ts, d, '~'); getline(ts, t, '~'); getline(ts, r, '~');
+        try { v.push_back({stoi(d), t, r}); } catch (...) {}
+    }
+    return v;
+}
+
+string encodeInts(const vector<int>& v) {
+    string r;
+    for (int i = 0; i < (int)v.size(); i++) {
+        if (i) r += ";";
+        r += to_string(v[i]);
+    }
+    return r;
+}
+vector<int> decodeInts(const string& s) {
+    vector<int> v;
+    istringstream ss(s);
+    string tok;
+    while (getline(ss, tok, ';')) {
+        if (!tok.empty()) try { v.push_back(stoi(tok)); } catch (...) {}
+    }
+    return v;
+}
+
+void saveData() {
+    ofstream f(DATA_FILE);
+    if (!f) return;
+    f << "STUDENTS\n";
+    for (auto& s : students)
+        f << s.name << "|" << s.studentId << "\n";
+    f << "LECTURERS\n";
+    for (auto& l : lecturers)
+        f << l.name << "|" << l.staffId << "|" << l.status << "\n";
+    f << "CLASSES\n";
+    for (auto& c : classes)
+        f << c.className << "|" << c.classCode << "|" << c.semester << "|"
+          << c.lecturerIndex << "|" << encodeSchedules(c.schedules) << "|"
+          << encodeInts(c.studentIndices) << "\n";
+}
+
+void loadData() {
+    ifstream f(DATA_FILE);
+    if (!f) return;
+    students.clear(); lecturers.clear(); classes.clear(); usedCodes.clear();
+    string line, sec;
+    while (getline(f, line)) {
+        if (line == "STUDENTS")  { sec = "S"; continue; }
+        if (line == "LECTURERS") { sec = "L"; continue; }
+        if (line == "CLASSES")   { sec = "C"; continue; }
+        if (line.empty()) continue;
+        istringstream ss(line);
+        string t;
+        if (sec == "S") {
+            Student st;
+            getline(ss, st.name, '|'); getline(ss, st.studentId, '|');
+            students.push_back(st);
+        } else if (sec == "L") {
+            Lecturer lc;
+            getline(ss, lc.name, '|'); getline(ss, lc.staffId, '|'); getline(ss, lc.status, '|');
+            lecturers.push_back(lc);
+        } else if (sec == "C") {
+            Class cl;
+            string code, lIdx, scheds, studs;
+            getline(ss, cl.className, '|');
+            getline(ss, code, '|');
+            getline(ss, cl.semester, '|');
+            getline(ss, lIdx, '|');
+            getline(ss, scheds, '|');
+            getline(ss, studs);
+            try { cl.classCode = stoi(code); } catch (...) { cl.classCode = genCode(); }
+            try { cl.lecturerIndex = stoi(lIdx); } catch (...) { cl.lecturerIndex = 0; }
+            cl.schedules      = decodeSchedules(scheds);
+            cl.studentIndices = decodeInts(studs);
+            usedCodes.insert(cl.classCode);
+            classes.push_back(cl);
+        }
+    }
+}
+
+// ============================================================
+//  SAMPLE DATA
+// ============================================================
+void initSample() {
+    // Students (25)
+    vector<pair<string,string>> sdata = {
+        {"Nguyen Van An",    "20220001"}, {"Tran Thi Bich",   "20220002"},
+        {"Le Van Cuong",     "20220003"}, {"Pham Thi Dung",   "20220004"},
+        {"Hoang Van Em",     "20220005"}, {"Vu Thi Phuong",   "20220006"},
+        {"Dang Van Giang",   "20220007"}, {"Bui Thi Ha",      "20220008"},
+        {"Do Van Hieu",      "20220009"}, {"Ngo Thi Lan",     "20220010"},
+        {"Dinh Van Minh",    "20220011"}, {"Truong Thi Nam",  "20220012"},
+        {"Ly Van Oanh",      "20220013"}, {"Ha Thi Phuong",   "20220014"},
+        {"Cao Van Quyen",    "20220015"}, {"Nguyen Thi Roi",  "20220016"},
+        {"Tran Van Son",     "20220017"}, {"Le Thi Thu",      "20220018"},
+        {"Pham Van Uyen",    "20220019"}, {"Hoang Thi Van",   "20220020"},
+        {"Vu Van Xuan",      "20220021"}, {"Dang Thi Yen",    "20220022"},
+        {"Bui Van Zung",     "20220023"}, {"Do Thi Anh",      "20220024"},
+        {"Ngo Van Binh",     "20220025"}
+    };
+    for (auto& p : sdata) students.push_back({p.first, p.second});
+
+    // Lecturers (3)
+    lecturers.push_back({"PGS.TS. Nguyen Van Hung", "CB001", "Pho Giao su - Tien si"});
+    lecturers.push_back({"TS. Tran Thi Mai",         "CB002", "Tien si"});
+    lecturers.push_back({"ThS. Le Van Khanh",        "CB003", "Thac si - Giang vien chinh"});
+
+    string sem = currentSemester();
+
+    // Classes (6)
+    auto addC = [&](string name, string s, int li,
+                    vector<Schedule> sc, vector<int> si) {
+        Class c;
+        c.className    = name;  c.classCode = genCode();
+        c.semester     = s;     c.lecturerIndex = li;
+        c.schedules    = sc;    c.studentIndices = si;
+        classes.push_back(c);
+    };
+
+    addC("Lap trinh C++",      sem, 0,
+         {{2,"07:00-09:30","D3-209"},{4,"07:00-09:30","D3-209"}},
+         {0,1,2,3,4,5,6,7,8,9});
+
+    addC("Giai tich 2",        sem, 1,
+         {{3,"09:45-12:15","B1-101"},{5,"09:45-12:15","B1-101"}},
+         {0,2,4,6,8,10,12,14,16,18});
+
+    addC("Vat ly dai cuong",   sem, 2,
+         {{4,"13:00-15:30","C2-301"},{6,"13:00-15:30","C2-301"}},
+         {1,3,5,7,9,11,13,15,17,19,20});
+
+    addC("Co so du lieu",      sem, 0,
+         {{3,"13:00-15:30","D3-105"},{6,"07:00-09:30","D3-105"}},
+         {0,1,2,3,4,5,6,7,8,9,10,11});
+
+    addC("Mang may tinh",      sem, 1,
+         {{2,"13:00-15:30","D4-401"},{5,"13:00-15:30","D4-401"}},
+         {10,11,12,13,14,15,16,17,18,19});
+
+    addC("Toan roi rac",       sem, 2,
+         {{7,"07:00-09:30","B1-201"}},
+         {0,5,10,15,20,21,22,23,24});
+}
+
+// ============================================================
+//  SCREEN: MENU  (Reminder)
+// ============================================================
+void showMenu() {
+    cls();
+    time_t  now = time(nullptr);
+    struct tm* t = localtime(&now);
+    const char* vDays[] = {"Chu Nhat","Thu Hai","Thu Ba","Thu Tu",
+                            "Thu Nam","Thu Sau","Thu Bay"};
+    char dateBuf[64];
+    sprintf(dateBuf, "%s, %02d/%02d/%04d",
+            vDays[t->tm_wday], t->tm_mday, t->tm_mon+1, t->tm_year+1900);
+
+    cout << "\n";
+    printHeader("UNIVERSITY SCHEDULE MANAGER");
+    cout << "\n";
+    cout << "  " << C::B << C::WH << dateBuf << C::R
+         << C::CY << "  |  " << C::R
+         << C::GR << C::B << "Hoc ky: " << currentSemester() << C::R << "\n\n";
+
+    // Today's classes
+    int dc = todayCode();
+    auto tc = classesOnDay(dc);
+    if (tc.empty()) {
+        cout << C::YL << "  Hom nay ban khong co lop hoc nao.\n" << C::R;
+    } else {
+        cout << C::GR << C::B << "  Cac lop hoc hom nay:\n" << C::R;
+        for (int ci : tc) {
+            auto& cl = classes[ci];
+            for (auto& sc : cl.schedules)
+                if (sc.dayOfWeek == dc)
+                    cout << C::CY << "    > " << C::R
+                         << C::WH << left << setw(26) << trunc(cl.className,24) << C::R
+                         << C::MG << setw(16) << sc.timeSlot << C::R
+                         << C::YL << "[" << sc.room << "]" << C::R << "\n";
+        }
+    }
+
+    cout << "\n";
+    printSep();
+    cout << "  " << C::B << C::WH << "[1]" << C::R << " Time Table\n";
+    cout << "  " << C::B << C::WH << "[2]" << C::R << " Danh sach cac lop\n";
+    cout << "  " << C::B << C::WH << "[3]" << C::R << " Them sinh vien moi\n";
+    cout << "  " << C::B << C::WH << "[4]" << C::R << " Them giang vien moi\n";
+    cout << "  " << C::B << C::WH << "[5]" << C::R << " Them lop hoc moi\n";
+    cout << "  " << C::B << C::WH << "[0]" << C::R << " Luu & Thoat\n";
+    printSep();
+    cout << C::YL << "  Chon: " << C::R;
+}
+
+// ============================================================
+//  SCREEN: TIMETABLE
+// ============================================================
+void showTimetable() {
+    cls();
+    time_t  mon  = weekMonday(S.weekOffset);
+    int     wNum = weekNumber(mon);
+
+    // Build day times
+    time_t days[7];
+    for (int i = 0; i < 7; i++) days[i] = mon + (time_t)i * 86400;
+
+    string title = "TUAN " + to_string(wNum)
+                 + " (" + fmtDate(days[0]) + " - " + fmtDate(days[6]) + ")";
+    if (S.weekOffset == 0) title += " [TUAN NAY]";
+    else if (S.weekOffset < 0) title += " [" + to_string(-S.weekOffset) + " TUAN TRUOC]";
+    else title += " [" + to_string(S.weekOffset) + " TUAN SAU]";
+
+    cout << "\n";
+    printHeader(title);
+    cout << "\n";
+
+    // Column header
+    cout << C::CY
+         << left << setw(7) << "  NGAY"
+         << setw(8) << "DATE"
+         << "LOP HOC\n";
+    printSep(66, '-');
+
+    int today = todayCode();
+    for (int i = 0; i < 7; i++) {
+        int  dc  = i + 2;           // 2=T2 ... 8=CN
+        auto vec = classesOnDay(dc);
+        bool isT = (S.weekOffset == 0 && dc == today);
+
+        struct tm* dTm = localtime(&days[i]);
+        char dateBuf[8];
+        sprintf(dateBuf, "%02d/%02d", dTm->tm_mday, dTm->tm_mon+1);
+
+        string dayLabel = dayShort(dc) + (isT ? "*" : " ");
+        if (isT) cout << C::GR << C::B;
+        else     cout << C::WH;
+
+        cout << "  " << setw(5) << dayLabel << setw(8) << dateBuf;
+
+        if (vec.empty()) {
+            cout << C::YL << "(khong co lop)" << C::R << "\n";
+        } else {
+            bool first = true;
+            for (int ci : vec) {
+                if (!first) cout << string(15, ' ');
+                auto& cl = classes[ci];
+                for (auto& sc : cl.schedules) {
+                    if (sc.dayOfWeek == dc) {
+                        cout << C::R << left << setw(24) << trunc(cl.className, 22)
+                             << C::MG << setw(16) << sc.timeSlot
+                             << C::YL << "[" << sc.room << "]" << C::R;
+                    }
+                }
+                cout << "\n";
+                first = false;
+            }
+        }
+        if (i < 6) cout << C::CY << "  " << string(62,'.') << C::R << "\n";
+    }
+
+    cout << "\n";
+    printSep();
+    cout << "  " << C::WH << "[A]" << C::R << " Tuan truoc  "
+         << C::WH << "[B]" << C::R << " Tuan sau  "
+         << C::WH << "[C2-C8]" << C::R << " Xem ngay  "
+         << C::WH << "[D]" << C::R << " Menu\n";
+    printSep();
+    cout << C::YL << "  Chon: " << C::R;
+}
+
+// ============================================================
+//  SCREEN: CLASS LIST
+// ============================================================
+void showClassList() {
+    cls();
+    int total  = (int)classes.size();
+    int pages  = max(1, (total + 9) / 10);
+    S.classPage = max(0, min(S.classPage, pages - 1));
+    int st = S.classPage * 10, en = min(st + 10, total);
+
+    cout << "\n";
+    printHeader("DANH SACH CAC LOP HOC");
+    cout << C::CY << "  Trang " << C::B << (S.classPage+1) << "/" << pages
+         << C::R << C::WH << "  (Tong: " << total << " lop)" << C::R << "\n\n";
+
+    cout << C::CY << "  " << left << setw(5) << "STT"
+         << setw(28) << "TEN LOP" << setw(9) << "HOC KY"
+         << setw(8) << "MA LOP" << "GIANG VIEN\n";
+    printSep(66, '-');
+
+    if (total == 0) {
+        cout << C::YL << "  (Chua co lop hoc nao)\n" << C::R;
+    } else {
+        for (int i = st; i < en; i++) {
+            auto& cl = classes[i];
+            int   n  = i - st + 1;
+            string lname = (cl.lecturerIndex >= 0 &&
+                            cl.lecturerIndex < (int)lecturers.size())
+                           ? trunc(lecturers[cl.lecturerIndex].name, 22) : "-";
+            cout << "  " << C::WH << setw(5) << n << C::R
+                 << setw(28) << trunc(cl.className, 26)
+                 << C::CY << setw(9) << cl.semester
+                 << C::YL << setw(8) << cl.classCode
+                 << C::GR << lname << C::R << "\n";
+        }
+    }
+
+    cout << "\n";
+    printSep();
+    cout << "  " << C::WH << "[A]" << C::R << " Trang sau  "
+         << C::WH << "[B]" << C::R << " Trang truoc  "
+         << C::WH << "[C+so]" << C::R << " Chi tiet (1-10)  "
+         << C::WH << "[D]" << C::R << " Menu\n";
+    printSep();
+    cout << C::YL << "  Chon: " << C::R;
+}
+
+// ============================================================
+//  SCREEN: CLASS DETAIL
+// ============================================================
+void showClassDetail() {
+    cls();
+    if (S.classIdx < 0 || S.classIdx >= (int)classes.size()) {
+        S.screen = Screen::CLASS_LIST; return;
+    }
+    auto& cl = classes[S.classIdx];
+
+    cout << "\n";
+    printHeader("CHI TIET LOP HOC");
+    cout << "\n";
+    cout << C::CY << "  Ten lop    : " << C::B << C::WH << cl.className << C::R << "\n";
+    cout << C::CY << "  Ma lop     : " << C::YL << cl.classCode << C::R << "\n";
+    cout << C::CY << "  Hoc ky     : " << C::WH << cl.semester << C::R << "\n";
+
+    if (cl.lecturerIndex >= 0 && cl.lecturerIndex < (int)lecturers.size())
+        cout << C::CY << "  Giang vien : " << C::GR
+             << lecturers[cl.lecturerIndex].name << C::R << "\n";
+
+    cout << "\n" << C::CY << "  Lich hoc (cac buoi co dinh trong tuan):\n" << C::R;
+    if (cl.schedules.empty()) {
+        cout << "    " << C::YL << "(Chua co lich hoc)\n" << C::R;
+    } else {
+        for (auto& sc : cl.schedules)
+            cout << "    " << C::MG << "* " << C::R
+                 << left << setw(12) << dayName(sc.dayOfWeek)
+                 << C::YL << setw(16) << sc.timeSlot
+                 << C::WH << "[" << sc.room << "]" << C::R << "\n";
+    }
+
+    cout << C::CY << "\n  So sinh vien: " << C::WH
+         << cl.studentIndices.size() << C::R << "\n";
+
+    cout << "\n";
+    printSep();
+    cout << "  " << C::WH << "[A]" << C::R << " Chi tiet GV  "
+         << C::WH << "[B]" << C::R << " Danh sach SV  "
+         << C::WH << "[C]" << C::R << " Ve danh sach lop\n";
+    printSep();
+    cout << C::YL << "  Chon: " << C::R;
+}
+
+// ============================================================
+//  SCREEN: LECTURER DETAIL
+// ============================================================
+void showLecturerDetail() {
+    cls();
+    if (S.lecturerIdx < 0 || S.lecturerIdx >= (int)lecturers.size()) {
+        S.screen = Screen::CLASS_DETAIL; return;
+    }
+    auto& l = lecturers[S.lecturerIdx];
+    int cnt = 0;
+    for (auto& cl : classes) if (cl.lecturerIndex == S.lecturerIdx) cnt++;
+
+    cout << "\n";
+    printHeader("CHI TIET GIANG VIEN");
+    cout << "\n";
+    cout << C::CY << "  Ten          : " << C::B << C::WH << l.name   << C::R << "\n";
+    cout << C::CY << "  Ma can bo    : " << C::YL << l.staffId         << C::R << "\n";
+    cout << C::CY << "  Trang thai   : " << C::GR << l.status          << C::R << "\n";
+    cout << C::CY << "  So lop phu trach: " << C::WH << cnt            << C::R << "\n";
+
+    cout << "\n";
+    printSep();
+    cout << "  " << C::WH << "[A]" << C::R << " Ds mon dam nhan  "
+         << C::WH << "[B]" << C::R << " Ve chi tiet lop\n";
+    printSep();
+    cout << C::YL << "  Chon: " << C::R;
+}
+
+// ============================================================
+//  SCREEN: LECTURER COURSES
+// ============================================================
+void showLecturerCourses() {
+    cls();
+    if (S.lecturerIdx < 0) { S.screen = Screen::LECTURER_DETAIL; return; }
+
+    vector<int> lc;
+    for (int i = 0; i < (int)classes.size(); i++)
+        if (classes[i].lecturerIndex == S.lecturerIdx) lc.push_back(i);
+
+    int total = (int)lc.size();
+    int pages = max(1, (total + 9) / 10);
+    S.lecturerCoursePage = max(0, min(S.lecturerCoursePage, pages - 1));
+    int st = S.lecturerCoursePage * 10, en = min(st + 10, total);
+
+    string title = "MON CUA: " + trunc(lecturers[S.lecturerIdx].name, 40);
+    cout << "\n";
+    printHeader(title);
+    cout << C::CY << "  Trang " << C::B << (S.lecturerCoursePage+1) << "/" << pages << C::R << "\n\n";
+
+    if (total == 0) {
+        cout << C::YL << "  (Giang vien nay chua phu trach lop nao)\n" << C::R;
+    } else {
+        cout << C::CY << "  " << setw(5) << "STT" << setw(30) << "TEN LOP" << "HOC KY\n";
+        printSep(50,'-');
+        for (int i = st; i < en; i++) {
+            auto& cl = classes[lc[i]];
+            cout << "  " << C::WH << setw(5) << (i-st+1) << C::R
+                 << setw(30) << trunc(cl.className, 28)
+                 << C::CY << cl.semester << C::R << "\n";
+        }
+    }
+
+    cout << "\n";
+    printSep();
+    cout << "  " << C::WH << "[B]" << C::R << " Trang sau  "
+         << C::WH << "[C]" << C::R << " Trang truoc  "
+         << C::WH << "[D]" << C::R << " Ve chi tiet GV\n";
+    printSep();
+    cout << C::YL << "  Chon: " << C::R;
+}
+
+// ============================================================
+//  SCREEN: STUDENT LIST
+// ============================================================
+void showStudentList() {
+    cls();
+    if (S.classIdx < 0 || S.classIdx >= (int)classes.size()) {
+        S.screen = Screen::CLASS_DETAIL; return;
+    }
+    auto& cl    = classes[S.classIdx];
+    int   total = (int)cl.studentIndices.size();
+    int   pages = max(1, (total + 9) / 10);
+    S.studentPage = max(0, min(S.studentPage, pages - 1));
+    int st = S.studentPage * 10, en = min(st + 10, total);
+
+    cout << "\n";
+    printHeader("DANH SACH SV: " + trunc(cl.className, 40));
+    cout << C::CY << "  Trang " << C::B << (S.studentPage+1) << "/" << pages
+         << C::R << C::WH << "  (Tong: " << total << " SV)" << C::R << "\n\n";
+
+    cout << C::CY << "  " << left << setw(5) << "STT"
+         << setw(26) << "HO TEN" << "MSSV\n";
+    printSep(45, '-');
+
+    if (total == 0) {
+        cout << C::YL << "  (Chua co sinh vien nao trong lop)\n" << C::R;
+    } else {
+        for (int i = st; i < en; i++) {
+            int si = cl.studentIndices[i];
+            if (si < 0 || si >= (int)students.size()) continue;
+            auto& sv = students[si];
+            cout << "  " << C::WH << setw(5) << (i-st+1) << C::R
+                 << setw(26) << trunc(sv.name, 24)
+                 << C::YL << sv.studentId << C::R << "\n";
+        }
+    }
+
+    cout << "\n";
+    printSep();
+    cout << "  " << C::WH << "[A]" << C::R << " Trang sau  "
+         << C::WH << "[B]" << C::R << " Trang truoc  "
+         << C::WH << "[C]" << C::R << " Ve chi tiet lop\n";
+    printSep();
+    cout << C::YL << "  Chon: " << C::R;
+}
+
+// ============================================================
+//  ADD DATA SCREENS
+// ============================================================
+
+// Pause and wait for Enter
+void waitEnter() {
+    cout << C::CY << "\n  Nhan Enter de tiep tuc..." << C::R;
+    cin.get();
+}
+
+void addStudentScreen() {
+    cls();
+    printHeader("THEM SINH VIEN MOI");
+    cout << "\n";
+
+    Student sv;
+    cout << C::CY << "  Ho ten    : " << C::R;
+    getline(cin, sv.name);
+    if (sv.name.empty()) return;
+
+    cout << C::CY << "  Ma so SV  : " << C::R;
+    getline(cin, sv.studentId);
+
+    for (auto& ex : students) {
+        if (ex.studentId == sv.studentId) {
+            cout << C::RD << "\n  [!] Ma so SV nay da ton tai!\n" << C::R;
+            waitEnter(); return;
+        }
+    }
+
+    students.push_back(sv);
+    saveData();
+    cout << C::GR << "\n  [OK] Da them: " << sv.name
+         << " (" << sv.studentId << ")\n" << C::R;
+    waitEnter();
+}
+
+void addLecturerScreen() {
+    cls();
+    printHeader("THEM GIANG VIEN MOI");
+    cout << "\n";
+
+    Lecturer l;
+    cout << C::CY << "  Ho ten       : " << C::R; getline(cin, l.name);
+    if (l.name.empty()) return;
+
+    cout << C::CY << "  Ma can bo     : " << C::R; getline(cin, l.staffId);
+    cout << C::CY << "  Trang thai    : " << C::R; getline(cin, l.status);
+
+    for (auto& ex : lecturers) {
+        if (ex.staffId == l.staffId) {
+            cout << C::RD << "\n  [!] Ma can bo nay da ton tai!\n" << C::R;
+            waitEnter(); return;
+        }
+    }
+
+    lecturers.push_back(l);
+    saveData();
+    cout << C::GR << "\n  [OK] Da them GV: " << l.name << "\n" << C::R;
+    waitEnter();
+}
+
+void addClassScreen() {
+    cls();
+    printHeader("THEM LOP HOC MOI");
+    cout << "\n";
+
+    if (lecturers.empty()) {
+        cout << C::RD << "  [!] Chua co giang vien nao. Vui long them GV truoc!\n" << C::R;
+        waitEnter(); return;
+    }
+
+    Class cl;
+    cout << C::CY << "  Ten lop          : " << C::R; getline(cin, cl.className);
+    if (cl.className.empty()) return;
+
+    cout << C::CY << "  Hoc ky (vd 20252): " << C::R; getline(cin, cl.semester);
+
+    // Choose lecturer
+    cout << "\n" << C::CY << "  Danh sach giang vien:\n" << C::R;
+    for (int i = 0; i < (int)lecturers.size(); i++)
+        cout << "    " << C::WH << (i+1) << ". " << C::R << lecturers[i].name << "\n";
+    cout << C::CY << "  Chon GV (1-" << lecturers.size() << "): " << C::R;
+    string s; getline(cin, s);
+    int li = 0;
+    try { li = stoi(s) - 1; } catch (...) {}
+    cl.lecturerIndex = max(0, min((int)lecturers.size()-1, li));
+
+    // Add schedules
+    cout << "\n" << C::CY << "  Them buoi hoc (ngay: 2=T2...8=CN, 0=xong):\n" << C::R;
+    while (true) {
+        cout << C::CY << "  Ngay (0=xong): " << C::R;
+        string ds; getline(cin, ds);
+        int day = 0;
+        try { day = stoi(ds); } catch (...) {}
+        if (day == 0) break;
+        if (day < 2 || day > 8) {
+            cout << C::RD << "  Ngay khong hop le (2-8)!\n" << C::R; continue;
+        }
+        Schedule sc; sc.dayOfWeek = day;
+        cout << C::CY << "  Gio (vd 07:00-09:30): " << C::R; getline(cin, sc.timeSlot);
+        cout << C::CY << "  Phong (vd D3-209)   : " << C::R; getline(cin, sc.room);
+        cl.schedules.push_back(sc);
+        cout << C::GR << "  [+] " << dayName(day) << " " << sc.timeSlot << "\n" << C::R;
+    }
+
+    // Optionally add existing students
+    cout << "\n" << C::CY << "  Them sinh vien vao lop? (c/n): " << C::R;
+    string yn; getline(cin, yn);
+    if (!yn.empty() && (yn[0]=='c'||yn[0]=='C'||yn[0]=='y'||yn[0]=='Y')) {
+        cout << C::CY << "  Nhap MSSV (Enter tung ma, nhap 'xong' de thoat):\n" << C::R;
+        while (true) {
+            cout << C::CY << "  MSSV: " << C::R;
+            string id; getline(cin, id);
+            if (id == "xong" || id.empty()) break;
+            bool found = false;
+            for (int i = 0; i < (int)students.size(); i++) {
+                if (students[i].studentId == id) {
+                    // Avoid duplicate in class
+                    if (find(cl.studentIndices.begin(),
+                             cl.studentIndices.end(), i) == cl.studentIndices.end()) {
+                        cl.studentIndices.push_back(i);
+                        cout << C::GR << "  [+] " << students[i].name << "\n" << C::R;
+                    } else {
+                        cout << C::YL << "  Da co trong lop.\n" << C::R;
+                    }
+                    found = true; break;
+                }
+            }
+            if (!found) cout << C::RD << "  Khong tim thay MSSV nay.\n" << C::R;
+        }
+    }
+
+    cl.classCode = genCode();
+    classes.push_back(cl);
+    saveData();
+    cout << C::GR << "\n  [OK] Da them lop: " << cl.className
+         << "  Ma: " << cl.classCode << "\n" << C::R;
+    waitEnter();
+}
+
+// ============================================================
+//  DISPLAY DISPATCHER
+// ============================================================
+void display() {
+    switch (S.screen) {
+        case Screen::MENU:             showMenu();            break;
+        case Screen::TIMETABLE:        showTimetable();       break;
+        case Screen::CLASS_LIST:       showClassList();       break;
+        case Screen::CLASS_DETAIL:     showClassDetail();     break;
+        case Screen::LECTURER_DETAIL:  showLecturerDetail();  break;
+        case Screen::LECTURER_COURSES: showLecturerCourses(); break;
+        case Screen::STUDENT_LIST:     showStudentList();     break;
+    }
+}
+
+// ============================================================
+//  INPUT HANDLER
+// ============================================================
+void handleInput() {
+    string inp;
+    getline(cin, inp);
+    if (inp.empty()) return;
+
+    char cmd = (char)toupper((unsigned char)inp[0]);
+    int  num = 0;
+    if (inp.size() > 1) { try { num = stoi(inp.substr(1)); } catch (...) {} }
+
+    switch (S.screen) {
+
+    // ------ MENU ------
+    case Screen::MENU:
+        if      (cmd == '1') { S.screen = Screen::TIMETABLE; S.weekOffset = 0; }
+        else if (cmd == '2') { S.screen = Screen::CLASS_LIST; S.classPage = 0; }
+        else if (cmd == '3') addStudentScreen();
+        else if (cmd == '4') addLecturerScreen();
+        else if (cmd == '5') addClassScreen();
+        else if (cmd == '0') {
+            saveData(); cls();
+            cout << C::GR << "\n  Da luu du lieu. Tam biet!\n\n" << C::R;
+            exit(0);
+        }
+        break;
+
+    // ------ TIMETABLE ------
+    case Screen::TIMETABLE:
+        if (cmd == 'A') S.weekOffset--;
+        else if (cmd == 'B') S.weekOffset++;
+        else if (cmd == 'C' && num >= 2 && num <= 8) {
+            // Show classes on a specific day this week
+            cls();
+            int dc = num;
+            auto vec = classesOnDay(dc);
+            printHeader("LOP HOC: " + dayName(dc));
+            cout << "\n";
+            if (vec.empty()) {
+                cout << C::YL << "  Khong co lop hoc nao trong ngay nay.\n" << C::R;
+            } else {
+                for (int ci : vec) {
+                    auto& cl = classes[ci];
+                    cout << C::CY << "  * " << C::B << C::WH << cl.className << C::R;
+                    for (auto& sc : cl.schedules)
+                        if (sc.dayOfWeek == dc)
+                            cout << C::MG << "  " << sc.timeSlot
+                                 << C::YL << "  [" << sc.room << "]" << C::R;
+                    cout << "\n";
+                }
+            }
+            waitEnter();
+        }
+        else if (cmd == 'D') S.screen = Screen::MENU;
+        break;
+
+    // ------ CLASS LIST ------
+    case Screen::CLASS_LIST: {
+        int total = (int)classes.size();
+        int pages = max(1, (total + 9) / 10);
+        if      (cmd == 'A') { if (S.classPage + 1 < pages) S.classPage++; }
+        else if (cmd == 'B') { if (S.classPage > 0) S.classPage--; }
+        else if (cmd == 'C' && num >= 1 && num <= 10) {
+            int abs = S.classPage * 10 + (num - 1);
+            if (abs < total) { S.classIdx = abs; S.screen = Screen::CLASS_DETAIL; }
+        }
+        else if (cmd == 'D') S.screen = Screen::MENU;
+        break;
+    }
+
+    // ------ CLASS DETAIL ------
+    case Screen::CLASS_DETAIL:
+        if (cmd == 'A') {
+            if (S.classIdx >= 0 && S.classIdx < (int)classes.size()) {
+                S.lecturerIdx = classes[S.classIdx].lecturerIndex;
+                S.lecturerCoursePage = 0;
+                S.screen = Screen::LECTURER_DETAIL;
+            }
+        }
+        else if (cmd == 'B') { S.studentPage = 0; S.screen = Screen::STUDENT_LIST; }
+        else if (cmd == 'C') S.screen = Screen::CLASS_LIST;
+        break;
+
+    // ------ LECTURER DETAIL ------
+    case Screen::LECTURER_DETAIL:
+        if      (cmd == 'A') { S.lecturerCoursePage = 0; S.screen = Screen::LECTURER_COURSES; }
+        else if (cmd == 'B') S.screen = Screen::CLASS_DETAIL;
+        break;
+
+    // ------ LECTURER COURSES ------
+    case Screen::LECTURER_COURSES: {
+        int cnt = 0;
+        for (auto& cl : classes) if (cl.lecturerIndex == S.lecturerIdx) cnt++;
+        int pages = max(1, (cnt + 9) / 10);
+        if      (cmd == 'B') { if (S.lecturerCoursePage + 1 < pages) S.lecturerCoursePage++; }
+        else if (cmd == 'C') { if (S.lecturerCoursePage > 0) S.lecturerCoursePage--; }
+        else if (cmd == 'D') S.screen = Screen::LECTURER_DETAIL;
+        break;
+    }
+
+    // ------ STUDENT LIST ------
+    case Screen::STUDENT_LIST: {
+        if (S.classIdx >= 0 && S.classIdx < (int)classes.size()) {
+            int total = (int)classes[S.classIdx].studentIndices.size();
+            int pages = max(1, (total + 9) / 10);
+            if      (cmd == 'A') { if (S.studentPage + 1 < pages) S.studentPage++; }
+            else if (cmd == 'B') { if (S.studentPage > 0) S.studentPage--; }
+        }
+        if (cmd == 'C') S.screen = Screen::CLASS_DETAIL;
+        break;
+    }
+
+    default: S.screen = Screen::MENU; break;
+    }
+}
+
+// ============================================================
+//  MAIN
+// ============================================================
+int main() {
+    enableAnsi();
+
+    // Load from file; if empty, load sample data
+    loadData();
+    if (classes.empty() && students.empty() && lecturers.empty()) {
+        initSample();
+        saveData();
+    }
+
+    // Main loop
+    while (true) {
+        display();
+        handleInput();
+    }
+
+    return 0;
+}

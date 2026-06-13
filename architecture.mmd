@@ -1,0 +1,31 @@
+graph TD
+    %% Định nghĩa các thành phần
+    Main[main.cpp<br>Khởi chạy & Vòng lặp chính]
+    
+    Handlers[handlers.h/cpp<br>Điều hướng & Xử lý Input]
+    Screens[screens.h/cpp<br>Giao diện UI & Form nhập]
+    Database[database.h/cpp<br>Đọc/Ghi File & Data mẫu]
+    Utils[utils.h/cpp<br>Hàm tiện ích & Xử lý ngày tháng]
+    
+    Globals[globals.h/cpp<br>Biến toàn cục & Trạng thái]
+    Types[types.h<br>Cấu trúc dữ liệu core]
+
+    %% Luồng điều khiển (Control Flow)
+    Main -->|Gọi hiển thị & input| Handlers
+    Main -->|Khởi tạo data| Database
+    
+    Handlers -->|Chuyển màn hình| Screens
+    Handlers -->|Cập nhật/Lưu data| Database
+    Handlers -->|Tính toán| Utils
+    
+    Screens -->|Lấy dữ liệu| Database
+    Screens -->|Định dạng| Utils
+    
+    Database -->|Mã hóa/Giải mã| Utils
+
+    %% Phụ thuộc dữ liệu (Data Dependency)
+    Handlers -.->|Đọc/Ghi state| Globals
+    Screens -.->|Đọc state & data| Globals
+    Database -.->|Ghi data| Globals
+    
+    Globals -.->|Sử dụng type| Types

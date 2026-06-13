@@ -1,0 +1,54 @@
+classDiagram
+    %% Lớp cơ sở (Base Class)
+    class Person {
+        <<abstract>>
+        #String name
+        +Person(String name)
+        +getName() String
+        +displayInfo()* void
+    }
+
+    %% Kế thừa (Inheritance)
+    class Student {
+        -String studentId
+        +Student(String name, String id)
+        +getStudentId() String
+        +displayInfo() void
+    }
+
+    class Lecturer {
+        -String staffId
+        -String status
+        +Lecturer(String name, String id, String status)
+        +getStaffId() String
+        +getStatus() String
+        +displayInfo() void
+    }
+
+    Person <|-- Student : Kế thừa (Inheritance)
+    Person <|-- Lecturer : Kế thừa (Inheritance)
+
+    %% Các lớp khác (Other Classes)
+    class Class {
+        -String className
+        -int classCode
+        -String semester
+        -int lecturerIndex
+        -List~int~ studentIndices
+        +addClass(Schedule s)
+        +addStudent(int studentIdx)
+        +displayClassInfo() void
+    }
+
+    class Schedule {
+        -int dayOfWeek
+        -String timeSlot
+        -String room
+        +Schedule(int day, String time, String room)
+        +getDetails() String
+    }
+
+    %% Mối quan hệ (Relationships)
+    Class "1" *-- "many" Schedule : Bao gồm (Composition)
+    Lecturer "1" -- "many" Class : Phụ trách (Association)
+    Student "many" -- "many" Class : Tham gia (Association)
